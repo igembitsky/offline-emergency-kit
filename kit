@@ -1,0 +1,216 @@
+#!/bin/bash
+# Offline Emergency Kit: a local AI that answers from offline Wikipedia, medical, repair and
+# survival libraries. Everything runs on this Mac and binds to 127.0.0.1.
+# Usage: ./kit install | start | serve | stop | status | doctor | download [core|ssd]
+#              | use <model> | watch on|off
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+LIB="$HERE/library"
+LOGS="$HERE/logs"
+KIWIX_PORT="${KIT_KIWIX_PORT:-8090}"
+APP_PORT="${KIT_APP_PORT:-8091}"
+DEFAULT_MODEL="qwen3.5:9b"
+# Your model choice is in model.txt (set it with ./kit use <model>). KIT_MODEL overrides it once.
+MODEL="${KIT_MODEL:-$(cat "$HERE/model.txt" 2>/dev/null || echo "$DEFAULT_MODEL")}"
+MIRROR="https://download.kiwix.org/zim"
+KIWIX_TOOLS_VERSION=3.8.2
+# Kiwix publishes no checksum for kiwix-tools, so these are pinned from a verified download.
+KIWIX_SHA_arm64=5c64d43176627e558a117146b02ea36b7da2b0cd3a332cbff075cde05d9585f9
+KIWIX_SHA_x86_64=ae341280e97ad5902e7a4282a24340eac7d7061c267661c0ef2a88a34547f247
+WATCH_LABEL="local.offline-emergency-kit.watch"
+mkdir -p "$LIB" "$LOGS"
+
+# An external drive joins the library when it has a folder named offline-kit-library at its top.
+ssd_dirs() { for d in /Volumes/*/offline-kit-library; do [ -d "$d" ] && echo "$d"; done; }
+
+up() { curl -s -o /dev/null -m 2 "$1"; }
+
+start_ollama() {
+  if up http://127.0.0.1:11434/api/version; then return 0; fi
+  command -v ollama >/dev/null || { echo "Ollama is not installed. Get it from https://ollama.com/download"; return 1; }
+  echo "Starting Ollama..."
+  if [ -d /Applications/Ollama.app ]; then open -g -a Ollama; else nohup ollama serve >"$LOGS/ollama.log" 2>&1 & fi
+  for _ in $(seq 1 30); do up http://127.0.0.1:11434/api/version && return 0; sleep 1; done
+  echo "Ollama did not start. Open the Ollama app, then run ./kit start again."; return 1
+}
+
+start_kiwix() {
+  if up "http://127.0.0.1:$KIWIX_PORT/"; then return 0; fi
+  local files=() f d
+  for f in "$LIB"/*.zim; do [ -f "$f" ] && files+=("$f"); done
+  while IFS= read -r d; do for f in "$d"/*.zim; do [ -f "$f" ] && files+=("$f"); done; done < <(ssd_dirs)
+  if [ ${#files[@]} -eq 0 ]; then echo "No libraries yet. Run: ./kit download core"; return 1; fi
+  [ -x "$HERE/bin/kiwix-serve" ] || { echo "Kiwix is not installed. Run: ./kit install"; return 1; }
+  echo "Starting the library server with ${#files[@]} libraries..."
+  nohup "$HERE/bin/kiwix-serve" --address=127.0.0.1 --port=$KIWIX_PORT --nodatealiases \
+    --skipInvalid --searchLimit=0 "${files[@]}" >"$LOGS/kiwix.log" 2>&1 &
+  echo $! >"$LOGS/kiwix.pid"
+  for _ in $(seq 1 20); do up "http://127.0.0.1:$KIWIX_PORT/" && return 0; sleep 0.5; done
+  echo "The library server did not start. See $LOGS/kiwix.log"; return 1
+}
+
+start_app() {
+  if up "http://127.0.0.1:$APP_PORT/health"; then return 0; fi
+  echo "Starting the question app..."
+  KIT_MODEL="$MODEL" KIWIX="http://127.0.0.1:$KIWIX_PORT" PORT=$APP_PORT \
+    nohup /usr/bin/python3 -I "$HERE/app/server.py" >"$LOGS/app.log" 2>&1 &
+  echo $! >"$LOGS/app.pid"
+  for _ in $(seq 1 20); do up "http://127.0.0.1:$APP_PORT/health" && return 0; sleep 0.5; done
+  echo "The question app did not start. See $LOGS/app.log"; return 1
+}
+
+warm_model() {
+  # Load the model now so the first question is fast. It unloads 5 minutes after the last question.
+  curl -s -m 120 http://127.0.0.1:11434/api/chat -d "{\"model\":\"$MODEL\",\"messages\":[],\"keep_alive\":\"5m\"}" >/dev/null &
+}
+
+stop_pid() {
+  local f="$LOGS/$1.pid"
+  if [ -f "$f" ]; then kill "$(cat "$f")" 2>/dev/null; rm -f "$f"; fi
+}
+
+status() {
+  local ok=1 d old
+  up http://127.0.0.1:11434/api/version && echo "AI model server (Ollama): on" || { echo "AI model server (Ollama): off"; ok=0; }
+  up "http://127.0.0.1:$KIWIX_PORT/" && echo "Library server: on, http://127.0.0.1:$KIWIX_PORT" || { echo "Library server: off"; ok=0; }
+  up "http://127.0.0.1:$APP_PORT/health" && echo "Question app: on, http://127.0.0.1:$APP_PORT" || { echo "Question app: off"; ok=0; }
+  if ollama list 2>/dev/null | awk '{print $1}' | grep -Fx "$MODEL" >/dev/null; then echo "Model $MODEL: installed"; else echo "Model $MODEL: MISSING (run: ollama pull $MODEL)"; ok=0; fi
+  echo "Libraries on the Mac: $(find "$LIB" -name '*.zim' | wc -l | tr -d ' ') files, $(du -sh "$LIB" | cut -f1)"
+  while IFS= read -r d; do echo "Libraries on external drive: $(find "$d" -name '*.zim' | wc -l | tr -d ' ') files in $d"; done < <(ssd_dirs)
+  # File dates are download dates. Remind after 6 months.
+  old=$(find "$LIB" -name '*.zim' -mtime +180 2>/dev/null | wc -l | tr -d ' ')
+  [ "$old" != 0 ] && echo "REMINDER: $old libraries are more than 6 months old. When online, run: ./kit download core"
+  [ $ok = 1 ]
+}
+
+# Find the newest dated file for a name in a Kiwix folder.
+latest() {
+  curl -sL "$MIRROR/$1/" | grep -oE "\"$2_[0-9]{4}-[0-9]{2}\.zim\"" | tr -d '"' | sort | tail -1
+}
+
+download() {
+  local tier="${1:-core}" dest="$LIB"
+  if [ "$tier" = ssd ]; then
+    dest="${2:-$(ssd_dirs | head -1)}"
+    if [ -z "$dest" ]; then echo "Connect the external drive and make a folder named offline-kit-library at its top."; return 1; fi
+  fi
+  mkdir -p "$dest"
+  grep -v '^#' "$HERE/catalog.tsv" | awk -F'\t' -v t="$tier" '$1==t {print $2"\t"$3}' | while IFS=$'\t' read -r folder name; do
+    local file want got old
+    file=$(latest "$folder" "$name")
+    if [ -z "$file" ]; then echo "SKIP $name: not found on the Kiwix server"; continue; fi
+    if [ -f "$dest/$file" ]; then echo "OK   $file (already here)"; continue; fi
+    echo "GET  $file"
+    if ! curl -fL -C - --retry 5 --retry-delay 10 -o "$dest/$file.part" "$MIRROR/$folder/$file"; then
+      echo "FAIL $file: download stopped. Run the same command again to resume."; continue
+    fi
+    want=$(curl -fsL "$MIRROR/$folder/$file.sha256" | awk '{print $1}')
+    got=$(shasum -a 256 "$dest/$file.part" | awk '{print $1}')
+    if [ -z "$want" ] || [ "$want" != "$got" ]; then
+      echo "FAIL $file: checksum missing or does not match. The file stays as .part for a retry."; continue
+    fi
+    mv "$dest/$file.part" "$dest/$file"
+    # Remove older dated copies of the same library only after the new one is verified.
+    for old in "$dest/${name}"_[0-9][0-9][0-9][0-9]-[0-9][0-9].zim; do
+      [ -f "$old" ] && [ "$old" != "$dest/$file" ] && { echo "DEL  old $(basename "$old")"; rm -f "$old"; }
+    done
+    echo "DONE $file"
+  done
+  echo "Downloads finished. Run ./kit stop then ./kit start to load new libraries."
+}
+
+install() {
+  # Kiwix server (official build, checksum pinned) and the model. Ollama comes from ollama.com.
+  [ "$(uname -s)" = Darwin ] || { echo "This kit is for macOS. For Linux or Windows, rebuild it with an agent (see README)."; return 1; }
+  command -v ollama >/dev/null || { echo "Install Ollama first: https://ollama.com/download"; return 1; }
+  local arch sha tmp name want
+  arch=$(uname -m); [ "$arch" = arm64 ] || arch=x86_64
+  if [ ! -x "$HERE/bin/kiwix-serve" ]; then
+    name="kiwix-tools_macos-$arch-$KIWIX_TOOLS_VERSION"
+    tmp=$(mktemp -d)
+    curl -fsL "https://download.kiwix.org/release/kiwix-tools/$name.tar.gz" -o "$tmp/k.tgz" || { echo "Download failed."; return 1; }
+    sha=$(shasum -a 256 "$tmp/k.tgz" | awk '{print $1}')
+    if [ "$arch" = arm64 ]; then want=$KIWIX_SHA_arm64; else want=$KIWIX_SHA_x86_64; fi
+    if [ "$sha" != "$want" ]; then echo "Kiwix download checksum does not match. Stopped."; rm -rf "$tmp"; return 1; fi
+    tar xzf "$tmp/k.tgz" -C "$tmp" && mkdir -p "$HERE/bin" && cp "$tmp/$name"/kiwix-* "$HERE/bin/"
+    rm -rf "$tmp"
+  fi
+  "$HERE/bin/kiwix-serve" --version | head -1
+  ollama pull "$MODEL"
+  echo "Next: ./kit download core   (about 13 GB), then ./kit start"
+}
+
+use_model() {
+  # Switch the model: pull, test, and remove the old one only if the test passes.
+  local new="$1" old="$MODEL"
+  [ -z "$new" ] && { echo "Usage: ./kit use <model>"; return 1; }
+  ollama pull "$new" || return 1
+  echo "$new" >"$HERE/model.txt"
+  MODEL="$new"; stop_pid app; start_kiwix && start_app || return 1
+  if /usr/bin/python3 -I "$HERE/app/selftest.py" "$APP_PORT"; then
+    [ "$old" != "$new" ] && ollama rm "$old" && echo "Removed the old model $old."
+    echo "The kit now uses $new."
+  else
+    echo "$old" >"$HERE/model.txt"; MODEL="$old"; stop_pid app; start_app
+    echo "The test failed with $new. The kit still uses $old. $new stays installed for a look."
+    return 1
+  fi
+}
+
+watch() {
+  # Weekly model watch (Mondays 06:30) as a launchd job for this user. Off by default.
+  local plist="$HOME/Library/LaunchAgents/$WATCH_LABEL.plist"
+  case "${1:-}" in
+    on)
+      mkdir -p "$HERE/bench/model-watch" "$HOME/Library/LaunchAgents"
+      cat >"$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$WATCH_LABEL</string>
+  <key>Nice</key><integer>10</integer>
+  <key>ProgramArguments</key>
+  <array><string>/usr/bin/python3</string><string>-I</string><string>$HERE/bench/model-watch.py</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>StartCalendarInterval</key>
+  <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>6</integer><key>Minute</key><integer>30</integer></dict>
+  <key>StandardOutPath</key><string>$HERE/bench/model-watch/run.log</string>
+  <key>StandardErrorPath</key><string>$HERE/bench/model-watch/run.log</string>
+</dict>
+</plist>
+EOF
+      launchctl bootout "gui/$(id -u)/$WATCH_LABEL" 2>/dev/null
+      launchctl bootstrap "gui/$(id -u)" "$plist" && echo "Weekly model watch on: Mondays 06:30. Result: bench/model-watch/status.md" ;;
+    off)
+      launchctl bootout "gui/$(id -u)/$WATCH_LABEL" 2>/dev/null
+      rm -f "$plist" && echo "Weekly model watch off." ;;
+    *) echo "Usage: ./kit watch on|off"; return 1 ;;
+  esac
+}
+
+case "${1:-}" in
+  install) install ;;
+  use) use_model "${2:-}" ;;
+  watch) watch "${2:-}" ;;
+  start)
+    start_ollama && start_kiwix && start_app || exit 1
+    warm_model
+    status
+    open "http://127.0.0.1:$APP_PORT" 2>/dev/null
+    ;;
+  serve)
+    # Like start, but does not open the browser (for scripts and the weekly model watch).
+    start_ollama && start_kiwix && start_app ;;
+  stop)
+    stop_pid app; stop_pid kiwix
+    curl -s http://127.0.0.1:11434/api/chat -d "{\"model\":\"$MODEL\",\"messages\":[],\"keep_alive\":0}" >/dev/null
+    echo "Stopped the question app and the library server, and unloaded the model. Ollama stays on."
+    ;;
+  status) status ;;
+  download) shift; download "$@" ;;
+  doctor) status && /usr/bin/python3 -I "$HERE/app/selftest.py" "$APP_PORT" ;;
+  *) echo "Usage: ./kit install | start | serve | stop | status | doctor | download [core|ssd] | use <model> | watch on|off"; exit 1 ;;
+esac

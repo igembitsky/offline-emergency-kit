@@ -1,0 +1,11 @@
+library/
+logs/
+bin/
+*.part
+__pycache__/
+.DS_Store
+.vscode/
+bench/results/
+model.txt
+CLAUDE.local.md
+bench/model-watch/

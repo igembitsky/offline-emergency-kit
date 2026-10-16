@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Offline Kit</title>
+<style>
+  :root {
+    --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a64; --line: #e3e1da;
+    --accent: #1f6f5c; --accent-ink: #ffffff; --user: #e9f2ef; --warn: #9a3412;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151614; --panel: #1e201d; --ink: #ecebe6; --muted: #a09e96; --line: #33352f;
+      --accent: #5bbf9f; --accent-ink: #0f1a16; --user: #22302b; --warn: #fb923c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; background: var(--bg); border-bottom: 1px solid var(--line);
+    padding: 10px 16px; display: flex; align-items: center; gap: 12px; z-index: 1; }
+  header h1 { font-size: 17px; margin: 0; }
+  header .meta { color: var(--muted); font-size: 13px; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header a { color: var(--accent); font-size: 14px; text-decoration: none; white-space: nowrap; }
+  main { max-width: 760px; margin: 0 auto; padding: 16px 16px 160px; }
+  .msg { margin: 14px 0; }
+  .user { background: var(--user); border-radius: 12px; padding: 10px 14px; margin-left: 15%; white-space: pre-wrap; }
+  .bot { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; }
+  .bot p { margin: 0 0 10px; } .bot p:last-child { margin-bottom: 0; }
+  .bot ol, .bot ul { margin: 0 0 10px; padding-left: 22px; }
+  .bot h3 { font-size: 16px; margin: 12px 0 6px; }
+  .status { color: var(--muted); font-size: 14px; font-style: italic; }
+  .cite { color: var(--accent); font-weight: 600; text-decoration: none; font-size: 13px; }
+  .sources { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 14px; }
+  .sources a { color: var(--accent); text-decoration: none; }
+  .sources span { color: var(--muted); }
+  .err { color: var(--warn); }
+  details.think { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+  details.think pre { white-space: pre-wrap; font: inherit; max-height: 200px; overflow: auto; }
+  form { position: fixed; bottom: 0; left: 0; right: 0; background: var(--bg); border-top: 1px solid var(--line);
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); }
+  .row { max-width: 760px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; }
+  textarea { flex: 1; resize: none; font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--ink); min-height: 46px; max-height: 160px; }
+  button { font: inherit; border: 0; border-radius: 10px; padding: 10px 16px; background: var(--accent); color: var(--accent-ink); cursor: pointer; min-height: 46px; }
+  button:disabled { opacity: .5; }
+  .opts { max-width: 760px; margin: 6px auto 0; display: flex; gap: 16px; font-size: 13px; color: var(--muted); }
+  .opts label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+  .empty { color: var(--muted); text-align: center; margin-top: 18vh; }
+  .empty b { color: var(--ink); display: block; font-size: 18px; margin-bottom: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Offline Kit</h1>
+  <div class="meta" id="meta">Loading...</div>
+  <a id="browse" href="#" target="_blank" rel="noopener">Browse libraries</a>
+</header>
+<main id="chat">
+  <div class="empty" id="empty"><b>Ask anything. No internet needed.</b>
+    Answers come from offline Wikipedia, medicine, repair and survival guides, with sources.</div>
+</main>
+<form id="f">
+  <div class="row">
+    <textarea id="q" rows="1" placeholder="How do I purify water without a filter?" autofocus></textarea>
+    <button id="send">Ask</button>
+  </div>
+  <div class="opts">
+    <label><input type="checkbox" id="think"> Think harder (slower)</label>
+    <label><button type="button" id="clear" style="min-height:0;padding:2px 10px;font-size:13px">New chat</button></label>
+  </div>
+</form>
+<script>
+const $ = s => document.querySelector(s);
+const chat = $('#chat'), q = $('#q'), send = $('#send');
+let history = [];
+try { $('#think').checked = localStorage.getItem('think') === '1'; } catch (e) {}
+$('#think').onchange = e => { try { localStorage.setItem('think', e.target.checked ? '1' : '0'); } catch (_) {} };
+
+fetch('/api/info').then(r => r.json()).then(i => {
+  $('#meta').textContent = `${i.model} · ${i.books.length} libraries`;
+  if (/^http:\/\/127\.0\.0\.1:\d+$/.test(i.kiwix)) $('#browse').href = i.kiwix;
+}).catch(() => { $('#meta').textContent = 'App is starting...'; });
+
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+
+function md(text, sources) {
+  const inline = s => esc(s)
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/(^|[^*])\*([^*\s][^*]*?)\*(?!\*)/g, '$1<i>$2</i>')
+    .replace(/\[(S\d+(?:\s*,\s*S\d+)*)\]/g, (m, ids) => ids.split(/\s*,\s*/).map(id =>
+      sources[id] ? `<a class="cite" href="${esc(sources[id].url)}" target="_blank" rel="noopener">[${id}]</a>` : `[${id}]`).join(''));
+  const out = []; let list = null;
+  for (const raw of text.split('\n')) {
+    const line = raw.trimEnd();
+    const ol = line.match(/^\s*\d+[.)]\s+(.*)/), ul = line.match(/^\s*[-*•]\s+(.*)/), h = line.match(/^#{1,4}\s+(.*)/);
+    const want = ol ? 'ol' : ul ? 'ul' : null;
+    if (list && list !== want) { out.push(`</${list}>`); list = null; }
+    if (want) { if (!list) { out.push(`<${want}>`); list = want; } out.push(`<li>${inline((ol || ul)[1])}</li>`); }
+    else if (h) out.push(`<h3>${inline(h[1])}</h3>`);
+    else if (line.trim()) out.push(`<p>${inline(line)}</p>`);
+  }
+  if (list) out.push(`</${list}>`);
+  return out.join('');
+}
+
+function bubble(cls, text) {
+  $('#empty')?.remove();
+  const d = document.createElement('div'); d.className = 'msg ' + cls;
+  if (text) d.textContent = text;
+  chat.appendChild(d); window.scrollTo(0, document.body.scrollHeight); return d;
+}
+
+async function ask(text) {
+  history.push({ role: 'user', content: text });
+  bubble('user', text);
+  const box = bubble('bot');
+  const body = document.createElement('div'), status = document.createElement('div');
+  status.className = 'status'; status.textContent = 'Starting...';
+  box.append(status, body);
+  let answer = '', thinking = '', sources = {}, srcList = [];
+  const thinkEl = document.createElement('details'); thinkEl.className = 'think';
+  thinkEl.innerHTML = '<summary>Model reasoning</summary><pre></pre>';
+  const render = () => { body.innerHTML = md(answer, sources); };
+  send.disabled = true;
+  try {
+    const r = await fetch('/api/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: history, think: $('#think').checked }) });
+    const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 1); if (!line.trim()) continue;
+        const ev = JSON.parse(line);
+        if (ev.type === 'status') status.textContent = ev.text;
+        else if (ev.type === 'thinking') { thinking += ev.text; if (!thinkEl.isConnected) box.insertBefore(thinkEl, body); thinkEl.querySelector('pre').textContent = thinking; }
+        else if (ev.type === 'token') { status.textContent = ''; answer += ev.text; render(); }
+        else if (ev.type === 'clear') { answer = ''; render(); }
+        else if (ev.type === 'source') { sources[ev.id] = ev; srcList.push(ev); }
+        else if (ev.type === 'warning') { const w = document.createElement('div'); w.className = 'err'; w.style.fontSize = '13px'; w.textContent = ev.text; box.appendChild(w); }
+        else if (ev.type === 'error') { status.innerHTML = `<span class="err">${esc(ev.text)}</span>`; }
+      }
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+  } catch (e) { status.innerHTML = `<span class="err">The app did not answer. Is it running? (${esc(String(e))})</span>`; }
+  if (status.textContent === 'Starting...' || status.textContent.startsWith('Reading') || status.textContent.startsWith('Searching') || status.textContent.endsWith('...')) status.textContent = '';
+  if (srcList.length) {
+    const s = document.createElement('div'); s.className = 'sources';
+    s.innerHTML = '<b>Sources</b><br>' + srcList.map(x =>
+      `${x.id}: <a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a> <span>· ${esc(x.book)}</span>`).join('<br>');
+    box.appendChild(s);
+  }
+  render();
+  history.push({ role: 'assistant', content: answer });
+  send.disabled = false; q.focus();
+}
+
+$('#f').onsubmit = e => { e.preventDefault(); const t = q.value.trim(); if (!t || send.disabled) return; q.value = ''; q.style.height = ''; ask(t); };
+q.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('#f').requestSubmit(); } });
+q.addEventListener('input', () => { q.style.height = 'auto'; q.style.height = Math.min(q.scrollHeight, 160) + 'px'; });
+$('#clear').onclick = () => { history = []; chat.innerHTML = ''; q.focus(); };
+</script>
+</body>
+</html>

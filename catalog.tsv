@@ -1,0 +1,27 @@
+# Offline libraries. The download script picks the newest dated file for each name.
+# tier: core = on the Mac (about 13 GB). ssd = only on the external drive.
+# The zimgit-* libraries are PDF guide collections with no search index: you read them yourself
+# (Browse libraries, or the Kiwix app on a phone). The AI searches the other libraries.
+# tier	kiwix_folder	name (without date)	why
+core	wikipedia	wikipedia_en_top_nopic	Most-read English Wikipedia articles, full text
+core	wikipedia	wikipedia_en_medicine_maxi	Wikipedia medicine, with pictures
+core	other	wikem_en_all_maxi	WikEM emergency medicine
+core	ifixit	ifixit_en_all	iFixit repair guides, with pictures
+core	other	zimgit-post-disaster_en	Post-disaster survival guides
+core	other	zimgit-water_en	Water purification and storage
+core	other	zimgit-food-preparation_en	Food preparation and preservation
+core	other	zimgit-medicine_en	Field medicine guides
+core	other	zimgit-knots_en	Knots
+core	other	appropedia_en_all_maxi	Appropriate technology and practical how-to
+core	wikivoyage	wikivoyage_en_all_nopic	Travel guide for every country and city
+core	wikipedia	wikipedia_en_history_nopic	History
+core	wikipedia	wikipedia_en_geography_nopic	Geography
+core	wikipedia	wikipedia_en_physics_nopic	Physics
+core	wikipedia	wikipedia_en_chemistry_nopic	Chemistry
+core	wikipedia	wikipedia_en_molcell_nopic	Molecular and cell biology
+core	wikipedia	wikipedia_en_astronomy_nopic	Astronomy and space
+core	wikipedia	wikipedia_en_computer_nopic	Computing
+core	wikipedia	wikipedia_en_mathematics_nopic	Mathematics
+ssd	wikipedia	wikipedia_en_all_nopic	All of English Wikipedia, full text (about 49 GB)
+ssd	wikipedia	wikipedia_en_movies_nopic	Films
+ssd	wiktionary	wiktionary_en_all_nopic	English dictionary
